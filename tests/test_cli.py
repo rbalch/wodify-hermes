@@ -285,3 +285,54 @@ def test_book_class_posts_wodify_booking_payload():
     result = client.book_class(123)
 
     assert result == {"success": True, "message": "Booked"}
+
+
+def _authed_client() -> WodifyClient:
+    client = WodifyClient(
+        {"membership_id": "stale-id"},
+        client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))),
+    )
+    client.session.authenticated = True
+    client.session.user_id = "u1"
+    client.session.customer = "hex"
+    return client
+
+
+def test_book_class_self_heals_rotated_membership(monkeypatch):
+    client = _authed_client()
+    attempts: list[str] = []
+
+    def fake_attempt(self, class_id):
+        attempts.append(self.membership_id)
+        if self.membership_id == "stale-id":
+            return {"success": False, "message": "Cannot make the reservation."}
+        return {"success": True, "message": "Booked"}
+
+    monkeypatch.setattr(WodifyClient, "_attempt_book", fake_attempt)
+    monkeypatch.setattr(WodifyClient, "discover_membership_id", lambda self: "fresh-id")
+
+    result = client.book_class(123)
+
+    assert result == {"success": True, "message": "Booked"}
+    assert attempts == ["stale-id", "fresh-id"]   # failed, re-discovered, retried
+    assert client.membership_id == "fresh-id"
+    assert client.membership_refreshed is True
+
+
+def test_book_class_does_not_retry_when_membership_unchanged(monkeypatch):
+    client = _authed_client()
+    attempts: list[str] = []
+
+    def fake_attempt(self, class_id):
+        attempts.append(self.membership_id)
+        return {"success": False, "message": "Class is full"}
+
+    monkeypatch.setattr(WodifyClient, "_attempt_book", fake_attempt)
+    # discovery returns the SAME id — nothing rotated, so no retry.
+    monkeypatch.setattr(WodifyClient, "discover_membership_id", lambda self: "stale-id")
+
+    result = client.book_class(123)
+
+    assert result["success"] is False
+    assert attempts == ["stale-id"]               # exactly one attempt, no double-book
+    assert client.membership_refreshed is False

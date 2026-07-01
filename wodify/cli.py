@@ -22,9 +22,10 @@ def get_client() -> WodifyClient:
     return WodifyClient(config)
 
 
-def _persist_if_hashes_changed(client: WodifyClient) -> None:
-    """Quietly persist refreshed version hashes when they changed (bookkeeping)."""
-    if client.version_changed:
+def _persist_if_changed(client: WodifyClient) -> None:
+    """Quietly persist config when the client self-healed: refreshed version
+    hashes (bookkeeping) or a rotated membership id."""
+    if client.version_changed or client.membership_refreshed:
         save_config(client.config_updates())
 
 
@@ -95,7 +96,7 @@ def get_classes(date: Optional[str] = typer.Option(None, "--date"),
     except Exception as exc:
         typer.echo(f"Error fetching classes: {exc}{client.drift_note()}", err=True)
         raise SystemExit(1)
-    _persist_if_hashes_changed(client)
+    _persist_if_changed(client)
     if json_output:
         typer.echo(json.dumps([cls.model_dump() for cls in classes], indent=2))
         return
@@ -126,7 +127,7 @@ def book(class_id: int = typer.Argument(..., help="ID of the class to book"),
     except Exception as exc:
         typer.echo(f"Booking failed: {exc}{client.drift_note()}", err=True)
         raise SystemExit(1)
-    _persist_if_hashes_changed(client)
+    _persist_if_changed(client)
     if json_output:
         typer.echo(json.dumps(resp))
         if not resp.get("success"):

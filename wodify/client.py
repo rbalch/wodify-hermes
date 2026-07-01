@@ -121,6 +121,9 @@ class WodifyClient:
     # stale. Only meaningful when paired with a failed/unhealthy response — then
     # it points at a breaking change on Wodify's side.
     server_version_mismatch: bool = field(default=False, init=False)
+    # Set when a booking self-healed by re-discovering a rotated membership id,
+    # so the caller knows to persist the refreshed value.
+    membership_refreshed: bool = field(default=False, init=False)
     session_initialized: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -479,6 +482,8 @@ class WodifyClient:
         if not self.session.authenticated:
             self.login()
         if not self.membership_id:
+            self.membership_id = self.discover_membership_id()
+        if not self.membership_id:
             raise ValueError("membership_id is required to book a class")
         if dry_run:
             return {
@@ -486,6 +491,22 @@ class WodifyClient:
                 "dry_run": True,
                 "message": f"[DRY RUN] would book class {class_id} using membership {self.membership_id}",
             }
+
+        result = self._attempt_book(class_id)
+        if not result["success"]:
+            # Membership ids rotate (monthly on auto-renew); a stale one yields
+            # "Cannot make the reservation". Re-discover once and, if it actually
+            # changed, retry the booking with the fresh id. Guarding on "changed"
+            # avoids a pointless second attempt (and any double-book risk) when
+            # the failure was something else.
+            fresh = self.discover_membership_id()
+            if fresh and fresh != self.membership_id:
+                self.membership_id = fresh
+                self.membership_refreshed = True
+                result = self._attempt_book(class_id)
+        return result
+
+    def _attempt_book(self, class_id: int | str) -> Dict[str, Any]:
         response = self._post(
             BOOK_PATH,
             {
