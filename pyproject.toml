@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wodify-hermes"
+version = "0.1.0"
+description = "Hermes tool for Wodify integration"
+readme = "README.md"
+authors = [{name = "Migration Bot", email = "dev@example.com"}]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "pydantic",
+    "typer",
+]
+
+[project.optional-dependencies]
+# testing dependencies
+test = ["pytest", "pytest-mock"]
+
+[project.scripts]
+# Entry point for hermes plugin (placeholder, actual registration may differ)
+hermes-wodify = "wodify.cli:app"
