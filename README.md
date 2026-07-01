@@ -109,21 +109,35 @@ Install editable, with test dependencies:
 git clone https://github.com/rbalch/wodify-hermes.git
 cd wodify-hermes
 pip install -e ".[test]"
-pytest -q          # 5 tests, all mocked via httpx.MockTransport — no live calls
+pytest -q          # mocked via httpx.MockTransport — no live calls
 ```
 
 See the `Makefile` for shortcut targets (`make dev`, `make test`,
 `make get-classes DATE=...`, `make login`, etc.).
+
+## Version drift
+
+Wodify's OutSystems deployment hashes change whenever they ship an update. The
+client re-scrapes them on every login and treats the result as bookkeeping, not
+failure:
+
+- **Hashes changed, responses healthy** → the client updates in place and the
+  CLI quietly persists the new hashes to config. No noise. (`version_changed`
+  is set; `changed_endpoints` lists what moved.)
+- **Hashes changed, responses unhealthy / a call fails** → the failure is
+  surfaced with a note that the hashes changed, flagging a likely breaking
+  change on Wodify's side rather than a bug here. `book`/`get-classes` append
+  this note (`WodifyClient.drift_note()`) to their error output.
+
+The WAF-walled endpoints (`booking`, `classAccess`, `membership*`) can't be
+re-scraped, so their stored hashes are reused; if Wodify rotates one of those
+behind the WAF, the corresponding call is where a breaking change would show up.
 
 ## Known gaps / not-yet-ported
 
 These carried behaviors from the original OpenClaw plugin that are **not** in
 the Python port yet:
 
-- **Drift self-heal.** The client raises `WodifyDriftError` and detects version
-  drift, but nothing yet catches it to re-run discovery and retry. (Also note
-  the drift flag currently trips on healthy responses — needs tightening before
-  auto-recovery is wired up.)
 - **Command parity.** No equivalent yet of the original `wodify_check_access` or
   `wodify_refresh_config` tools.
 - **Hermes registration.** Invoked as the standalone `hermes-wodify` script, not

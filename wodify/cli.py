@@ -22,6 +22,12 @@ def get_client() -> WodifyClient:
     return WodifyClient(config)
 
 
+def _persist_if_hashes_changed(client: WodifyClient) -> None:
+    """Quietly persist refreshed version hashes when they changed (bookkeeping)."""
+    if client.version_changed:
+        save_config(client.config_updates())
+
+
 @app.command()
 def discover(
     gym_subdomain: str = typer.Option(..., "--gym-subdomain", prompt="Gym subdomain"),
@@ -84,7 +90,12 @@ def get_classes(date: Optional[str] = typer.Option(None, "--date"),
                     False, "--json", help="Emit the schedule as JSON (for scripting/agents).")) -> None:
     """Fetch and display available classes."""
     client = get_client()
-    classes = client.get_classes(date=date, program_filter=program_filter)
+    try:
+        classes = client.get_classes(date=date, program_filter=program_filter)
+    except Exception as exc:
+        typer.echo(f"Error fetching classes: {exc}{client.drift_note()}", err=True)
+        raise SystemExit(1)
+    _persist_if_hashes_changed(client)
     if json_output:
         typer.echo(json.dumps([cls.model_dump() for cls in classes], indent=2))
         return
@@ -110,7 +121,12 @@ def book(class_id: int = typer.Argument(..., help="ID of the class to book"),
              False, "--json", help="Emit the booking result as JSON.")) -> None:
     """Book a specific class."""
     client = get_client()
-    resp = client.book_class(class_id, program_id, dry_run=dry_run)
+    try:
+        resp = client.book_class(class_id, program_id, dry_run=dry_run)
+    except Exception as exc:
+        typer.echo(f"Booking failed: {exc}{client.drift_note()}", err=True)
+        raise SystemExit(1)
+    _persist_if_hashes_changed(client)
     if json_output:
         typer.echo(json.dumps(resp))
         if not resp.get("success"):

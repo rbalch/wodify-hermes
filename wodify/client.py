@@ -113,7 +113,14 @@ class WodifyClient:
     client: httpx.Client | None = None
     timeout: float = 30.0
     session: WodifySession = field(default_factory=WodifySession, init=False)
-    version_drifted: bool = field(default=False, init=False)
+    # Bookkeeping only: the scraped version hashes differ from the ones we had
+    # stored. This is benign on its own (Wodify redeployed) — persist and move on.
+    version_changed: bool = field(default=False, init=False)
+    changed_endpoints: list[str] = field(default_factory=list, init=False)
+    # A live (non-bootstrap) API call's response said the version we SENT was
+    # stale. Only meaningful when paired with a failed/unhealthy response — then
+    # it points at a breaking change on Wodify's side.
+    server_version_mismatch: bool = field(default=False, init=False)
     session_initialized: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -148,7 +155,25 @@ class WodifyClient:
         self.session.authenticated = bool(value)
 
     def has_version_drift(self) -> bool:
-        return self.version_drifted
+        """Deprecated alias for :attr:`version_changed`."""
+
+        return self.version_changed
+
+    def drift_note(self) -> str:
+        """Human-readable note when hashes changed, else empty.
+
+        Meant to be appended to an error message so a failure can be explained
+        as a likely upstream breaking change rather than a bug in this tool.
+        """
+
+        if not (self.version_changed or self.server_version_mismatch):
+            return ""
+        detail = ", ".join(self.changed_endpoints) if self.changed_endpoints else "server rejected a sent version"
+        return (
+            f" NOTE: Wodify's version hashes changed ({detail}) — if this call "
+            "failed, it is most likely a breaking change on Wodify's side, not a "
+            "bug in this tool."
+        )
 
     def _version_info(self, key: str) -> dict[str, str]:
         if not self.version_hashes or not self.version_hashes.get("moduleVersion"):
@@ -189,10 +214,13 @@ class WodifyClient:
         except json.JSONDecodeError:
             data = {}
         version_info = data.get("versionInfo") if isinstance(data, dict) else None
-        if isinstance(version_info, dict) and (
+        # Only trust real calls. The session-bootstrap POST deliberately sends
+        # "bootstrap" as the version, so the server always reports a mismatch
+        # there — counting it would be a permanent false positive.
+        if raise_status and isinstance(version_info, dict) and (
             version_info.get("hasModuleVersionChanged") or version_info.get("hasApiVersionChanged")
         ):
-            self.version_drifted = True
+            self.server_version_mismatch = True
         return data if isinstance(data, dict) else {}
 
     def init_session(self) -> None:
@@ -222,11 +250,20 @@ class WodifyClient:
         if not self.email or not self.password:
             raise ValueError("email and password are required")
 
+        previous_hashes = dict(self.version_hashes)
         self.version_hashes = discover_version_hashes(
             self.gym_subdomain,
             existing=self.version_hashes,
             client=self.client,
         )
+        # Benign bookkeeping: note which known hashes actually changed value.
+        # (A hash appearing for the first time is not "drift".)
+        self.changed_endpoints = sorted(
+            key
+            for key, value in self.version_hashes.items()
+            if previous_hashes.get(key) and previous_hashes.get(key) != value
+        )
+        self.version_changed = bool(self.changed_endpoints)
         self.init_session()
 
         lookup = self._post(

@@ -141,6 +141,81 @@ def test_client_login_uses_wodify_outsystems_flow():
     assert client.session.authenticated is True
     assert client.version_hashes["emailLookup"] == "emailHash123"
     assert any(req.url.path.endswith("ActionPrepare_LoginUser") for req in requests)
+    # A healthy login with no prior hashes must NOT register as drift. In
+    # particular the session-bootstrap POST (which sends "bootstrap" versions)
+    # must not trip server_version_mismatch.
+    assert client.version_changed is False
+    assert client.server_version_mismatch is False
+
+
+def test_login_detects_version_change_without_failing():
+    # Stored hashes that differ from what the live JS now serves.
+    stored = {
+        "moduleVersion": "OLDmodule",
+        "login": "OLDlogin",
+        "emailLookup": "emailHash123",     # unchanged
+        "layoutTopInit": "layoutHash123",  # unchanged
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/moduleversioninfo"):
+            return httpx.Response(200, json={"versionToken": "moduleHash"})
+        if path.endswith("/moduleinfo"):
+            return httpx.Response(
+                200,
+                json={"manifest": {"urlVersions": {
+                    "/OnlineSalesPage/scripts/OnlineSalesPage.Common.UserInfo.mvc__a.js": "?a",
+                    "/OnlineSalesPage/scripts/OnlineSalesPage_CW.controller__b.js": "?b",
+                    "/OnlineSalesPage/scripts/OnlineSalesPage.Layouts.LayoutTop.mvc__c.js": "?c",
+                }}},
+            )
+        scripts = {
+            "/OnlineSalesPage/scripts/OnlineSalesPage.Common.UserInfo.mvc__a.js": 'ServiceAPIGetSignInGlobalUserNameByEmail", "emailHash123"',
+            "/OnlineSalesPage/scripts/OnlineSalesPage_CW.controller__b.js": 'ActionPrepare_LoginUser", "loginHash123"',
+            "/OnlineSalesPage/scripts/OnlineSalesPage.Layouts.LayoutTop.mvc__c.js": 'DataActionGet_InitialData_InLayoutTop", "layoutHash123"',
+        }
+        if path in scripts:
+            return httpx.Response(200, text=scripts[path])
+        if path.endswith("ServiceAPIGetSignInGlobalUserNameByEmail"):
+            if b'"bootstrap"' in request.read():
+                return httpx.Response(
+                    403,
+                    json={"ignored": True},
+                    headers={"Set-Cookie": "nr2W_Theme_UI=crf%3Dcsrf-token%3Buid%3D0%3Bunm%3D; Path=/"},
+                )
+            return httpx.Response(200, json={"data": {"Response": {
+                "ResponseGetSignInGlobalUserNameByEmail": {"Customer": "customerHex"},
+                "Error": {"HasError": False, "ErrorMessage": ""},
+            }}})
+        if path.endswith("ActionPrepare_LoginUser"):
+            return httpx.Response(200, json={"data": {
+                "ErrorMessage": "",
+                "Response_ValidateLogin": {
+                    "UserId": "user1", "GlobalUserId": "global1",
+                    "GlobalUserFirstName": "Test", "CustomerId": "123",
+                    "Customer": "customerHex2", "ClientIsSuspended": False,
+                    "CustomerIsSuspended": False, "GlobalUserStatusId_IsActive": True,
+                }}})
+        if path.endswith("DataActionGet_InitialData_InLayoutTop"):
+            return httpx.Response(200, json={"data": {"ActiveLocations": {"List": [{"Id": 12345, "Name": "Test Gym"}]}}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = WodifyClient(
+        {"membership_id": "existing-membership", "version_hashes": stored},
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = client.login("athlete@example.com", "secret")
+
+    # A version change is bookkeeping, not a failure — login still succeeds.
+    assert result.first_name == "Test"
+    assert client.session.authenticated is True
+    # Changed hashes are detected (benign); the server did not reject a version
+    # we sent, because login re-scrapes before making real calls.
+    assert client.version_changed is True
+    assert client.changed_endpoints == ["login", "moduleVersion"]
+    assert client.server_version_mismatch is False
+    assert client.drift_note().startswith(" NOTE: Wodify's version hashes changed")
 
 
 def test_get_classes_parses_wodify_schedule():
